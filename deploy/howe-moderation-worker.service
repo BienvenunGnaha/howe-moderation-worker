@@ -1,0 +1,49 @@
+# Travailleur de modération de Howé (spécification, section 15), sans Docker
+# (décision du 12/11/2026). À copier dans /etc/systemd/system/ sur le serveur de
+# traitement, puis : systemctl daemon-reload && systemctl enable --now howe-moderation-worker
+#
+# Un compte dédié, sans droits root ; le code dans /opt/howe-moderation-worker
+# (environnement virtuel dans venv/), les réglages dans /etc/howe-moderation-worker/worker.env.
+
+[Unit]
+Description=Travailleur de modération de Howé
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=howe-worker
+Group=howe-worker
+WorkingDirectory=/opt/howe-moderation-worker
+EnvironmentFile=/etc/howe-moderation-worker/worker.env
+ExecStart=/opt/howe-moderation-worker/venv/bin/python -m howe_worker
+# Arrêt propre : il ne prend plus rien et finit ses tâches (une photo dure moins d'une minute).
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=10
+
+# Limites du service (section 15) : à ajuster après mesure sur la machine réelle.
+CPUQuota=200%
+# Whisper small (environ 800 Mo, chargé une fois) + un encodage FFmpeg + les lectures d'images.
+MemoryMax=5G
+Nice=10
+
+# Protections : rien d'autre en écriture que son dossier temporaire.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RuntimeDirectory=howe-moderation-worker
+ReadWritePaths=/run/howe-moderation-worker
+
+[Install]
+WantedBy=multi-user.target

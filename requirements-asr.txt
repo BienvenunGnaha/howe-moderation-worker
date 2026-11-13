@@ -1,0 +1,5 @@
+# Transcription des paroles (compétence « asr ») : seulement sur les serveurs qui l'annoncent.
+-r requirements.txt
+faster-whisper==1.1.1
+# Importé par faster-whisper 1.1.1 sans être déclaré dans ses dépendances.
+requests==2.32.3

@@ -1,0 +1,9 @@
+# Image RunPod Serverless (lot 6) : tout le travailleur, Whisper compris, sur GPU.
+-r requirements-asr.txt
+# Moteur de faster-whisper ; la version qui tourne sur le poste de développement.
+ctranslate2==4.9.0
+# CTranslate2 4.x sur GPU demande cuBLAS 12 et cuDNN 9, que l'image runpod/base ne fournit pas.
+nvidia-cublas-cu12>=12.4,<13
+nvidia-cudnn-cu12>=9.1,<10
+# Le SDK RunPod, même version que ocr-worker (à vérifier avant la première construction).
+runpod==1.12.0

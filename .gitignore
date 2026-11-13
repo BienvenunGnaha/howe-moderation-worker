@@ -1,0 +1,34 @@
+# Posé avant le premier commit (lot 6) : un .gitignore arrivé trop tard ne désindexe rien
+# (voir le dépôt odoo18-custom-addons, dont l'historique poussé garde des secrets).
+
+# Secrets — rien de tout cela n'entre jamais ici. Sur RunPod, la clé privée du travailleur
+# est un secret de l'endpoint ; sur un serveur, un fichier 0600 dans /etc.
+.env
+.env.*
+*.env
+!deploy/worker.env.example
+*.key
+*.pem
+
+# Fichiers lus par le travailleur pendant les essais : photos et vidéos d'annonces.
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.mp4
+*.mov
+*.webm
+*.wav
+
+# Modèles (Whisper) : mis en cache dans l'image, jamais dans le dépôt.
+huggingface/
+models/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
