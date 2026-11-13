@@ -9,7 +9,7 @@ import runpod  # noqa: E402
 
 from howe_worker import VERSION  # noqa: E402
 from howe_worker.config import ConfigError  # noqa: E402
-from howe_worker.logs import error, log  # noqa: E402
+from howe_worker.logs import error, log, logger, stack  # noqa: E402
 from howe_worker.serverless import handle, quiet_http_logs, settings_for_runpod, warm_up  # noqa: E402
 
 quiet_http_logs()
@@ -19,5 +19,7 @@ try:
 except Exception as exc:  # noqa: BLE001 — le conteneur démarre quand même ; handle() rendra l'erreur à RunPod
     # Le message seulement pour une erreur de configuration : il est écrit par nous, sans secret.
     error("worker.container_setup_failed", error=type(exc).__name__, reason=str(exc)[:200] if isinstance(exc, ConfigError) else None)
+    if not isinstance(exc, ConfigError):
+        logger.warning("Pile d'appels du démarrage :\n%s", stack(exc))
 
 runpod.serverless.start({"handler": handle})

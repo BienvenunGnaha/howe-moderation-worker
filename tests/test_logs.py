@@ -1,9 +1,11 @@
-"""Le journal (spécification, section 16) : assez de détails pour suivre une tâche et
-trouver une panne, mais jamais de texte lu, de lien signé, de bail ni de clé."""
+"""Le journal, comme celui d'ocr-worker (13/11/2026) : `logging`, des phrases lisibles, un
+chronomètre par tâche avec son résumé. Assez de détails pour trouver une panne, jamais de
+texte lu, de lien signé, de bail ni de clé."""
 
 from __future__ import annotations
 
-import json
+import logging
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,65 +22,76 @@ from .conftest import FakeHowe, sign_photo, task
 SIGNED = "https://howe.test/api/moderation/v1/files/abc?expires=1700000000&signature=0123456789abcdef"
 
 
-@pytest.fixture
-def warning_level() -> Iterator[None]:
-    logs.set_level("warning")
+@pytest.fixture(autouse=True)
+def info_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    caplog.set_level(logging.INFO, logger="howe_worker")
     yield
     logs.set_level("info")
 
 
-def lines(out: str) -> list[dict]:
-    return [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+def messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "howe_worker"]
 
 
-def test_by_default_each_step_of_a_task_is_timed_and_tied_to_the_task(settings: Settings, tmp_path: Path, capsys) -> None:
+def test_the_format_is_the_one_of_ocr_worker() -> None:
+    root = logging.getLogger()
+    formats = {getattr(h.formatter, "_fmt", None) for h in root.handlers}
+    # basicConfig est sans effet si un autre module l'a appelé avant (pytest) ; le format, lui, est écrit dans logs.py.
+    source = Path(logs.__file__).read_text()
+    assert 'format="%(asctime)s %(levelname)-8s %(name)s — %(message)s"' in source
+    assert logs.logger.name == "howe_worker" and formats is not None
+
+
+def test_each_step_of_a_task_is_timed_then_summed_up(settings: Settings, tmp_path: Path, caplog) -> None:
     howe = FakeHowe({"photo": sign_photo(tmp_path / "panneau.png", "A LOUER 97 45 32 21")})
 
-    Runner(settings, howe).process(task("t-42"))  # type: ignore[arg-type]
+    Runner(settings, howe).process(task("4c4c61b6-1942-4403-8c8e-c14b215a6ea3"))  # type: ignore[arg-type]
 
-    records = lines(capsys.readouterr().out)
-    events = [r["event"] for r in records]
-    assert events[0] == "task.started" and events[-1] == "task.finished"
-    steps = [(r["step"], r.get("variant")) for r in records if r["event"] == "step.done"]
-    assert steps == [("open", None), ("tesseract", "original"), ("tesseract", "contrast"), ("qr", None)]
-    # Chaque ligne écrite pendant la tâche porte sa référence et son type, sans qu'on les passe à chaque appel.
-    assert all(r["task"] == "t-42" and r["kind"] == "photo_check" for r in records)
-    assert all(isinstance(r["ms"], int) for r in records if r["event"] == "step.done")
-    tesseract = next(r for r in records if r.get("step") == "tesseract")
-    assert tesseract["lines"] > 0 and tesseract["level"] == "info"
+    lines = messages(caplog)
+    assert lines[0].startswith("Tâche 4c4c61b6 prise : photo_check")
+    chrono = [l for l in lines if l.startswith("[CHRONO] 4c4c61b6 · ")]
+    steps = [re.match(r"\[CHRONO\] 4c4c61b6 · (.+?) — ", l).group(1) for l in chrono[:-1]]
+    assert steps == ["téléchargement", "ouverture", "lecture Tesseract (original)", "lecture Tesseract (contrast)", "QR codes", "rendu à Howé"]
+    assert re.search(r"— \d+,\d\d s \(cumul \d+,\d\d s\)", chrono[0])
+    # Le résumé, trié par durée, avec l'issue de la tâche.
+    assert re.match(r"\[CHRONO\] 4c4c61b6 · TOTAL \d+,\d\d s — .+ \(\d+ %\).* — photo_check, succeeded$", chrono[-1])
+    assert "Tâche 4c4c61b6 terminée : photo_check, succeeded" in "\n".join(lines)
+    # Ni le texte lu, ni le lien du fichier.
+    assert "LOUER" not in caplog.text and "97 45" not in caplog.text
 
 
-def test_at_the_warning_level_only_the_problems_are_written(settings: Settings, tmp_path: Path, capsys, warning_level) -> None:
+def test_at_the_warning_level_only_the_problems_are_written(settings: Settings, tmp_path: Path, caplog) -> None:
+    logs.set_level("warning")
     howe = FakeHowe({"photo": sign_photo(tmp_path / "panneau.png", "A LOUER")})
 
     Runner(settings, howe).process(task("t-1"))  # type: ignore[arg-type]
     Runner(settings, FakeHowe()).process(task("t-2", url="absente"))  # type: ignore[arg-type]
 
-    records = lines(capsys.readouterr().out)
-    assert [(r["event"], r["task"]) for r in records] == [("task.crashed", "t-2"), ("task.finished", "t-2")]
-    assert {r["level"] for r in records} == {"error", "warning"}
+    lines = messages(caplog)
+    assert lines and all("t-2" in l or l.startswith("Pile d'appels") for l in lines)
+    assert {r.levelname for r in caplog.records if r.name == "howe_worker"} == {"ERROR", "WARNING"}
 
 
-def test_a_failure_says_its_code_and_a_crash_says_where_but_never_its_message(settings: Settings, capsys) -> None:
+def test_a_failure_says_its_code_and_a_crash_shows_its_stack_but_never_its_message(settings: Settings, caplog) -> None:
+    # Le message est fabriqué à l'exécution : la pile montre les lignes de code, jamais les valeurs.
+    secret_message = " ".join(["échec", "de", "lecture", SIGNED])
+
     def broken(*_args):
-        raise ValueError(f"lecture impossible : {SIGNED}")
+        raise ValueError(secret_message)
 
     Runner(settings, FakeHowe(), {"photo_check": broken}).process(task("t-7"))  # type: ignore[arg-type]
-    Runner(settings, FakeHowe()).process(task("t-8", url="absente"))  # type: ignore[arg-type]
 
-    out = capsys.readouterr().out
-    assert "signature=" not in out and "lecture impossible" not in out
-    records = lines(out)
-    crash = next(r for r in records if r["event"] == "task.crashed")
-    assert crash["error"] == "ValueError" and crash["where"][0].startswith("test_logs.py:")
-    finished = [r for r in records if r["event"] == "task.finished"]
-    assert [(r["task"], r["outcome"], r["code"], r["level"]) for r in finished] == [
-        ("t-7", "failed", "worker_error", "warning"),
-        ("t-8", "failed", "worker_error", "warning"),
-    ]
+    assert "signature=" not in caplog.text and "échec de lecture" not in caplog.text
+    lines = messages(caplog)
+    assert any(l.startswith("Tâche t-7 (photo_check) : erreur inattendue ValueError") for l in lines)
+    stack = next(l for l in lines if l.startswith("Pile d'appels de la tâche t-7"))
+    assert "test_logs.py" in stack and "in broken" in stack and stack.endswith("ValueError")
+    finished = next(l for l in lines if l.startswith("Tâche t-7 terminée"))
+    assert "failed" in finished and "code=worker_error" in finished
+    assert any(l.startswith("[CHRONO] t-7 · TOTAL") and l.endswith("photo_check, failed") for l in lines)
 
 
-def test_the_cancellation_by_howe_is_written(settings: Settings, tmp_path: Path, capsys) -> None:
+def test_the_cancellation_by_howe_is_written(settings: Settings, caplog) -> None:
     import time
 
     def slow(_input, _workdir, _client, _settings, should_continue):
@@ -88,12 +101,12 @@ def test_the_cancellation_by_howe_is_written(settings: Settings, tmp_path: Path,
 
     Runner(settings, FakeHowe(keep_going=False), {"photo_check": slow}).process(task("t-3"))  # type: ignore[arg-type]
 
-    records = lines(capsys.readouterr().out)
-    assert any(r["event"] == "task.cancelled_by_howe" and r["task"] == "t-3" for r in records)
-    assert records[-1]["outcome"] == "cancelled"
+    lines = messages(caplog)
+    assert "Tâche t-3 annulée par Howé : arrêt" in lines
+    assert any(l.startswith("Tâche t-3 terminée : photo_check, cancelled") for l in lines)
 
 
-def test_calls_and_downloads_are_logged_without_the_link_or_the_lease(settings: Settings, tmp_path: Path, capsys) -> None:
+def test_calls_and_downloads_are_logged_without_the_link_or_the_lease(settings: Settings, tmp_path: Path, caplog) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/heartbeat"):
             return httpx.Response(200, json={"continue": True})
@@ -107,14 +120,13 @@ def test_calls_and_downloads_are_logged_without_the_link_or_the_lease(settings: 
     # Une demande restée vide n'est pas écrite : sans travail, elle revient toutes les 20 s.
     assert client.lease(["image"], 1, 0) == []
 
-    out = capsys.readouterr().out
-    assert "signature=" not in out and "expires=" not in out and "jeton-secret" not in out
-    download, call = lines(out)
-    assert (download["event"], download["name"], download["bytes"]) == ("file.download", "original", 2048)
-    assert (call["event"], call["method"], call["path"], call["status"]) == ("howe.call", "POST", "/tasks/t-9/heartbeat", 200)
+    assert "signature=" not in caplog.text and "expires=" not in caplog.text and "jeton-secret" not in caplog.text
+    download, call = messages(caplog)
+    assert re.match(r"^Fichier original lu : 2 048 octets en \d+ ms$", download)
+    assert re.match(r"^Howé POST /tasks/t-9/heartbeat → 200 en \d+ ms$", call)
 
 
-def test_a_refused_worker_is_told_what_to_check(settings: Settings, capsys) -> None:
+def test_a_refused_worker_is_told_what_to_check(settings: Settings, caplog) -> None:
     class Revoked(FakeHowe):
         def lease(self, *_args):
             raise Refused(401, "signature")
@@ -123,8 +135,8 @@ def test_a_refused_worker_is_told_what_to_check(settings: Settings, capsys) -> N
 
     Runner(replace(settings, idle_exit_seconds=5), Revoked()).run_forever()  # type: ignore[arg-type]
 
-    refused = next(r for r in lines(capsys.readouterr().out) if r["event"] == "worker.refused")
-    assert refused["level"] == "error" and "WORKER_REFERENCE" in refused["hint"]
+    refused = next(r for r in caplog.records if r.getMessage().startswith("Howé refuse le travailleur"))
+    assert refused.levelname == "ERROR" and "WORKER_REFERENCE" in refused.getMessage()
 
 
 def test_the_start_line_names_the_host_but_never_the_key(settings: Settings) -> None:
@@ -133,5 +145,5 @@ def test_the_start_line_names_the_host_but_never_the_key(settings: Settings) -> 
     fields = startup_fields(settings)
 
     assert fields["howe"] == "http://howe.test" and fields["worker"] == settings.reference[:8]
-    assert settings.seed.hex() not in json.dumps(fields, default=str)
+    assert settings.seed.hex() not in logs.render("worker.started", fields)
     assert logs.host_of(SIGNED) == "https://howe.test"

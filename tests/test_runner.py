@@ -12,7 +12,8 @@ from howe_worker.runner import Runner
 from .conftest import FakeHowe, sign_photo, task
 
 
-def test_a_result_is_returned_and_the_workdir_removed(settings: Settings, tmp_path: Path, capsys) -> None:
+def test_a_result_is_returned_and_the_workdir_removed(settings: Settings, tmp_path: Path, caplog) -> None:
+    caplog.set_level("INFO", logger="howe_worker")
     photo = sign_photo(tmp_path / "panneau.png", "A LOUER 97 45 32 21")
     howe = FakeHowe({"photo": photo})
 
@@ -23,11 +24,13 @@ def test_a_result_is_returned_and_the_workdir_removed(settings: Settings, tmp_pa
     assert reference == "t-1" and output["text"]
     assert list(settings.tmp_dir.iterdir()) == []
     # Le journal ne porte ni le texte lu ni le lien du fichier.
-    logged = capsys.readouterr().out
+    logged = caplog.text
+    assert "Tâche t-1 terminée" in logged
     assert "LOUER" not in logged and "97 45" not in logged and "photo" not in logged.replace("photo_check", "")
 
 
-def test_the_task_measures_go_back_with_the_result(settings: Settings, tmp_path: Path, capsys) -> None:
+def test_the_task_measures_go_back_with_the_result(settings: Settings, tmp_path: Path, caplog) -> None:
+    caplog.set_level("INFO", logger="howe_worker")
     # 0.3.0 (lot 5) : durée, mémoire de Tesseract (lue à sa fin) et du travailleur, rien d'autre.
     howe = FakeHowe({"photo": sign_photo(tmp_path / "panneau.png", "A LOUER")})
 
@@ -37,7 +40,7 @@ def test_the_task_measures_go_back_with_the_result(settings: Settings, tmp_path:
     assert reference == "t-1"
     assert set(metrics) == {"duration_ms", "worker_memory_mb", "tools_memory_mb"}
     assert metrics["tools_memory_mb"] >= 1 and metrics["worker_memory_mb"] >= 1 and metrics["duration_ms"] > 0
-    assert '"tools_memory_mb"' in capsys.readouterr().out
+    assert "tools_memory_mb=" in caplog.text
 
 
 def test_the_frames_read_are_measured_and_a_failure_carries_its_measures(settings: Settings) -> None:

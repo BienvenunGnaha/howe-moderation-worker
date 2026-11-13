@@ -69,7 +69,8 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
     started = time.monotonic()
     audio = workdir / "audio.wav"
     try:
-        client.download(task_input["audio_url"], audio, 8 * 1024 * 1024)
+        with step("download"):
+            client.download(task_input["audio_url"], audio, 8 * 1024 * 1024)
     except DownloadRefused as exc:
         raise TaskFailed(exc.code, exc.retryable) from exc
     if not should_continue():

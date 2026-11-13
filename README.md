@@ -35,44 +35,42 @@ Avec chaque résultat ou échec, le travailleur rend des nombres, jamais du text
 
 Les mêmes nombres figurent dans la ligne `task.finished` du journal.
 
-## Le journal (version 0.4.1)
+## Le journal (version 0.4.3, comme ocr-worker)
 
-Une ligne JSON par événement, sur la sortie standard : `journalctl -u howe-moderation-worker` sur un serveur, onglet « Logs » de l'endpoint sur RunPod. Chaque ligne porte `ts`, `level` et `event` ; pendant une tâche, aussi `task` (sa référence) et `kind`.
+Le module `logging` de Python, réglé comme ocr-worker, écrit sur la sortie d'erreur une ligne de texte lisible par événement. On la lit avec `journalctl -u howe-moderation-worker` sur un serveur, et dans l'onglet « Logs » de l'endpoint sur RunPod.
 
-**`LOG_LEVEL=info`** (par défaut) : tout le détail. `warning` ou `error` pour n'écrire que les avertissements, ou que les erreurs.
+```
+2026-11-13 19:19:54,120 INFO     howe_worker — Tâche 4c4c61b6 prise : video_prepare, bail jusqu'à …
+2026-11-13 19:19:54,370 INFO     howe_worker — [CHRONO] 4c4c61b6 · sondage ffprobe — 0,24 s (cumul 0,25 s) · seconds=26.4 · has_audio=True · width=368 · height=656
+2026-11-13 19:19:55,230 INFO     howe_worker — [CHRONO] 4c4c61b6 · encodage — 0,86 s (cumul 1,10 s) · bytes_in=2984081 · bytes_out=…
+2026-11-13 19:19:55,400 INFO     howe_worker — Fichier published.mp4 déposé chez Howé : 1 204 220 octets → 200 en 140 ms
+2026-11-13 19:19:57,734 INFO     howe_worker — Tâche 4c4c61b6 terminée : video_prepare, succeeded · duration_ms=… · tools_memory_mb=…
+2026-11-13 19:19:57,735 INFO     howe_worker — [CHRONO] 4c4c61b6 · TOTAL 3,61 s — encodage 0,86 s (24 %) · dépôt chez Howé … — video_prepare, succeeded
+```
 
-La vie du travailleur et de chaque tâche :
+**`LOG_LEVEL`** vaut `INFO` par défaut, avec tout le détail. `WARNING` n'écrit que les avertissements et les erreurs, `ERROR` que les erreurs.
 
-| Événement | Quand |
-|---|---|
-| `worker.started`, `worker.woken` | démarrage (serveur) ou réveil (RunPod) : version, hôte de Howé, début de la référence, compétences, places, Whisper |
-| `worker.container_started`, `worker.gpu`, `worker.warmed` | RunPod : conteneur lancé, GPU vus, Whisper chargé et en combien de temps |
-| `tasks.leased` | des tâches prises : combien, de quels types |
-| `task.started`, `task.finished` | début et fin d'une tâche : issue, code d'échec, durée, mémoire |
-| `task.cancelled_by_howe` | Howé a annulé la tâche (annonce retirée, nouvelle version…) |
-| `worker.waiting` | toutes les 10 minutes sans tâche : le travailleur est vivant |
-| `worker.idle_exit`, `worker.wake_done`, `worker.stopped` | arrêt, avec le bilan des tâches et la durée |
+**Chaque tâche a son chronomètre `[CHRONO]`**, sur le modèle de `chrono.py` d'ocr-worker :
 
-Le détail de chaque tâche, au même niveau :
+- une ligne par étape, avec sa durée, le cumul et des mesures : téléchargement, ouverture, lectures Tesseract, QR codes, sondage, encodage, aperçu, son, images, dépôt chez Howé, chargement de Whisper, transcription, rendu à Howé ;
+- puis un **résumé trié par durée décroissante**, écrit aussi quand la tâche échoue. C'est souvent l'étape trop longue qu'on cherche ;
+- la lecture des images d'une vidéo est cumulée dans le résumé, sans une ligne par image.
 
-- chaque appel à Howé (`howe.call` : méthode, chemin, statut, durée). Seule exception : une demande de tâche restée vide n'est pas écrite. Sans travail, elle revient toutes les 20 s ; `worker.waiting` suffit ;
-- chaque fichier lu ou déposé (`file.download`, `file.upload` : nom, taille, durée) ;
-- chaque étape d'une tâche (`step.done` / `step.failed`), avec sa durée et des nombres :
-  - photo : ouverture, lectures Tesseract, QR codes ;
-  - vidéo : sondage, encodage, aperçu, son, images ;
-  - transcription.
+**Ce qui est écrit aussi :**
 
-  Une vidéo écrit plus de 100 lignes.
+- le démarrage ou le réveil : version, hôte de Howé, compétences, places ; GPU vus et temps de chargement de Whisper sur RunPod ;
+- les tâches prises, leur début et leur fin : issue, code et détail d'un échec, avec le message de FFmpeg depuis la 0.4.2 ;
+- l'annulation par Howé ;
+- chaque appel à Howé et chaque fichier lu ou déposé, avec sa taille et sa durée. Seule exception : une demande de tâche restée vide n'est pas écrite ;
+- les avertissements : Howé injoignable, battement de cœur sans réponse, résultat non rendu ;
+- les erreurs :
+  - travailleur refusé, avec ce qu'il faut vérifier ;
+  - configuration invalide ;
+  - erreur inattendue, avec sa **pile d'appels**, comme ocr-worker.
 
-Les avertissements (`warning`) : Howé injoignable, battement de cœur manqué, résultat non rendu, tâche en échec.
+**Ce qui n'est jamais écrit** : le texte lu, les paroles transcrites, le contenu des QR codes, les liens signés (ni leur adresse ni leurs paramètres), le jeton du bail, la clé privée.
 
-Les erreurs (`error`) :
-
-- travailleur refusé, avec ce qu'il faut vérifier ;
-- erreur de configuration ;
-- `task.crashed`, avec le type de l'erreur et l'endroit du code où elle est née.
-
-**Ce qui n'est jamais écrit** : le texte lu, les paroles transcrites, le contenu des QR codes, les liens signés (ni leur adresse ni leurs paramètres), le jeton du bail, la clé privée. Le message d'une erreur inattendue non plus, car il peut contenir une adresse : seulement son type et l'endroit.
+La pile d'appels d'une erreur inattendue montre les lignes de code, mais se termine par le seul type de l'erreur, sans son message, car il peut contenir une adresse.
 
 ## Spécialiser un serveur
 

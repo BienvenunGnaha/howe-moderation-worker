@@ -21,7 +21,7 @@ from typing import Any
 from . import VERSION, video_transcribe
 from .client import HoweClient
 from .config import ConfigError, Settings, load
-from .logs import error, log, where
+from .logs import error, log, logger, stack, where
 from .runner import Runner, startup_fields
 
 # Valeurs par défaut sur RunPod, si l'endpoint ne les donne pas : un conteneur ne doit
@@ -61,7 +61,7 @@ def warm_up(settings: Settings) -> None:
     started = time.monotonic()
     try:
         video_transcribe.model(settings)
-        log("worker.warmed", model=settings.whisper_model, device=settings.whisper_device, ms=int((time.monotonic() - started) * 1000))
+        log("worker.warmed", model=settings.whisper_model, device=settings.whisper_device, seconds=f"{time.monotonic() - started:.1f}")
     except Exception as exc:  # noqa: BLE001 — la première transcription le signalera à Howé
         error("worker.warm_failed", reason=type(exc).__name__, code=getattr(exc, "code", None), detail=getattr(exc, "detail", None),
               ms=int((time.monotonic() - started) * 1000))
@@ -94,6 +94,7 @@ def handle(job: dict[str, Any], settings: Settings | None = None, client: HoweCl
         runner.run_forever()
     except Exception as exc:  # noqa: BLE001 — un bilan d'erreur plutôt qu'une exception chez RunPod
         error("worker.crashed", error=type(exc).__name__, where=where(exc))
+        logger.error("Pile d'appels :\n%s", stack(exc))
         return {"status": "error", "code": "worker_error", "outcomes": dict(runner.outcomes)}
 
     log("worker.wake_done", seconds=int(time.monotonic() - started), outcomes=dict(runner.outcomes))

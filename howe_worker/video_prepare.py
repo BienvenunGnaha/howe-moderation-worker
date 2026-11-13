@@ -138,7 +138,8 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
     started = time.monotonic()
     original = workdir / "original"
     try:
-        client.download(task_input["read_url"], original, settings.max_download_bytes)
+        with logs.step("download"):
+            client.download(task_input["read_url"], original, settings.max_download_bytes)
     except DownloadRefused as exc:
         raise TaskFailed(exc.code, exc.retryable) from exc
     _check_signature(original)

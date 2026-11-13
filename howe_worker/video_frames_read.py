@@ -17,7 +17,7 @@ from typing import Any
 
 from .client import DownloadRefused, HoweClient
 from .config import Settings
-from .logs import step
+from .logs import log, step
 from .photo_check import Cancelled, TaskFailed, open_checked, read_qr, tesseract_lines, tesseract_version
 
 
@@ -36,11 +36,13 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
             raise Cancelled()
         path = workdir / f"frame{index:04d}.jpg"
         try:
-            client.download(frame["url"], path, 2 * 1024 * 1024)
+            with step("download", quiet=True):
+                client.download(frame["url"], path, 2 * 1024 * 1024)
         except DownloadRefused as exc:
             raise TaskFailed(exc.code, exc.retryable) from exc
-        # Une ligne par image : le nombre de lignes lues, jamais leur texte.
-        with step("frame", index=index, at_ms=int(frame.get("at_ms") or 0)) as noted:
+        # Cumulé dans le résumé de la tâche plutôt qu'une ligne par image (jusqu'à 120), comme les
+        # étapes répétées d'ocr-worker ; jamais le texte lu.
+        with step("frame", quiet=True) as noted:
             image = open_checked(path, settings, limits)
             plain = workdir / f"frame{index:04d}.png"
             image.save(plain)
@@ -52,6 +54,7 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
         path.unlink(missing_ok=True)
         plain.unlink(missing_ok=True)
 
+    log("frames.read", count=len(results), lines=sum(len(r["text"]) for r in results), codes=sum(len(r["qr"]) for r in results))
     return {
         "frames": results,
         "engines": [tesseract_version(settings), *sorted(engines)],

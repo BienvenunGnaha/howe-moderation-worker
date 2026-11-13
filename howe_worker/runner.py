@@ -25,7 +25,7 @@ from typing import Any
 from . import VERSION, measure, photo_check, video_frames_read, video_prepare, video_transcribe
 from .client import HoweClient, HoweUnavailable, Refused
 from .config import Settings
-from .logs import bound, error, host_of, level_name, log, warning, where
+from .logs import bound, error, host_of, level_name, log, logger, stack, step, stopwatch, warning, where
 
 # Sans tâche, une ligne « worker.waiting » toutes les 10 minutes.
 WAITING_NOTE_SECONDS = 600
@@ -155,9 +155,15 @@ class Runner:
     # ── Une tâche ────────────────────────────────────────────────────────────
 
     def process(self, task: dict[str, Any]) -> str:
-        # Chaque ligne écrite pendant la tâche (téléchargements, étapes) porte sa référence et son type.
-        with bound(task=task["reference"], kind=task["kind"]):
-            return self._process(task)
+        # Chaque ligne écrite pendant la tâche (téléchargements, étapes) porte sa référence ; ses étapes
+        # s'inscrivent à son chronomètre, résumé à la fin (comme ocr-worker).
+        with bound(task=task["reference"], kind=task["kind"]), stopwatch(task["reference"][:8]) as watch:
+            outcome = "failed"
+            try:
+                outcome = self._process(task)
+                return outcome
+            finally:
+                watch.log_summary(f"{task['kind']}, {outcome}")
 
     def _process(self, task: dict[str, Any]) -> str:
         reference, token, kind = task["reference"], task["lease_token"], task["kind"]
@@ -195,8 +201,11 @@ class Runner:
             frames_read = read if isinstance(read, int) else None
             if cancelled.is_set():
                 outcome = "cancelled"
-            elif not self.client.complete(reference, token, output, metrics()):
-                outcome = "stale"  # le bail n'était plus à nous : Howé ignore le résultat
+            else:
+                with step("report"):
+                    accepted = self.client.complete(reference, token, output, metrics())
+                if not accepted:
+                    outcome = "stale"  # le bail n'était plus à nous : Howé ignore le résultat
         except photo_check.Cancelled:
             outcome = "cancelled"
         except photo_check.TaskFailed as exc:
@@ -211,8 +220,9 @@ class Runner:
         except Exception as exc:  # noqa: BLE001 — une tâche ne fait jamais tomber le travailleur
             outcome = "failed"
             failure = {"code": "worker_error", "retryable": True, "detail": type(exc).__name__}
-            # Le type et l'endroit de l'erreur, pas son message (il peut contenir un lien signé).
+            # Le type, l'endroit et la pile d'appels, pas son message (il peut contenir un lien signé).
             error("task.crashed", task=reference, kind=kind, error=type(exc).__name__, where=where(exc))
+            logger.error("Pile d'appels de la tâche %s :\n%s", reference[:8], stack(exc))
             self._safe_fail(reference, token, "worker_error", True, type(exc).__name__, metrics())
         finally:
             done.set()
