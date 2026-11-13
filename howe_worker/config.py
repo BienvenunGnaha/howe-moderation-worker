@@ -15,6 +15,7 @@ Variables :
 - lot 6 (RunPod Serverless) : WHISPER_DEVICE (cpu, cuda ou auto) et WHISPER_COMPUTE_TYPE (int8 sur
   processeur, float16 sur GPU) ; IDLE_EXIT_SECONDS (s'arrêter après tant de secondes sans tâche,
   0 = jamais) et MAX_RUN_SECONDS (ne plus prendre de tâche passé ce délai, 0 = sans limite)
+- LOG_LEVEL : info (par défaut) ou debug (chaque étape et chaque appel à Howé), lu par howe_worker/logs.py
 """
 
 from __future__ import annotations

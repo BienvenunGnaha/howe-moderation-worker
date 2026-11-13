@@ -29,6 +29,7 @@ from PIL import Image, ImageFilter, ImageOps
 from . import measure
 from .client import DownloadRefused, HoweClient
 from .config import Settings
+from .logs import step
 from .measure import MeasuredPopen
 
 MAX_LINES = 2000
@@ -232,8 +233,10 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
     if not should_continue():
         raise Cancelled()
 
-    image = open_checked(original, settings, task_input.get("limits") or {})
-    width, height = image.size
+    with step("open") as noted:
+        image = open_checked(original, settings, task_input.get("limits") or {})
+        width, height = image.size
+        noted.update(width=width, height=height)
     plain = workdir / "plain.png"
     image.save(plain)
 
@@ -248,14 +251,22 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
 
     # Le délai de la tâche (60 s) se partage entre les deux lectures.
     timeout = max(5.0, float(task_input.get("timeout") or 60) / 2)
-    lines = tesseract_lines(plain, "original", settings, should_continue, timeout, psm=3)
+    # Le journal compte les lignes lues, jamais leur texte.
+    with step("tesseract", variant="original") as noted:
+        lines = tesseract_lines(plain, "original", settings, should_continue, timeout, psm=3)
+        noted["lines"] = len(lines)
     if not should_continue():
         raise Cancelled()
-    lines += tesseract_lines(contrast, "contrast", settings, should_continue, timeout, psm=3)
+    with step("tesseract", variant="contrast") as noted:
+        more = tesseract_lines(contrast, "contrast", settings, should_continue, timeout, psm=3)
+        noted["lines"] = len(more)
+    lines += more
     if not should_continue():
         raise Cancelled()
 
-    qr, qr_engines = read_qr([image, gray])
+    with step("qr") as noted:
+        qr, qr_engines = read_qr([image, gray])
+        noted["codes"] = len(qr)
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
 
     return {

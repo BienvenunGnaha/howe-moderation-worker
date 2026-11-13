@@ -24,6 +24,7 @@ from nacl.signing import SigningKey
 
 from . import VERSION
 from .config import Settings
+from .logs import debug
 
 API_PREFIX = "/api/moderation/v1"
 
@@ -88,10 +89,14 @@ class HoweClient:
     def _call(self, method: str, path: str, payload: dict[str, Any] | None = None) -> httpx.Response:
         body = b"" if payload is None else json.dumps(payload, separators=(",", ":")).encode()
         full = API_PREFIX + path
+        started = time.monotonic()
         try:
             response = self._http.request(method, full, content=body, headers=self.signed_headers(method, full, body))
         except httpx.HTTPError as exc:
+            debug("howe.call", method=method, path=path, error=type(exc).__name__, ms=_ms(started))
             raise HoweUnavailable(type(exc).__name__) from exc
+        # Le chemin seul : il ne porte que la référence de la tâche, jamais le bail ni la signature.
+        debug("howe.call", method=method, path=path, status=response.status_code, ms=_ms(started))
         if response.status_code == 401:
             raise Refused(401, "signature")
         if response.status_code >= 500:
@@ -152,10 +157,13 @@ class HoweClient:
         full = f"{API_PREFIX}/tasks/{reference}/files/{name}"
         headers = self.signed_headers("PUT", full, body)
         headers.update({"Content-Type": "application/octet-stream", "X-Lease-Token": token})
+        started = time.monotonic()
         try:
             response = self._http.put(full, content=body, headers=headers, timeout=httpx.Timeout(120.0))
         except httpx.HTTPError as exc:
+            debug("file.upload", task=reference, name=name, bytes=len(body), error=type(exc).__name__, ms=_ms(started))
             raise HoweUnavailable(type(exc).__name__) from exc
+        debug("file.upload", task=reference, name=name, bytes=len(body), status=response.status_code, ms=_ms(started))
         if response.status_code == 401:
             raise Refused(401, "signature")
         if response.status_code in (400, 409):
@@ -167,8 +175,12 @@ class HoweClient:
     # ── Fichiers ─────────────────────────────────────────────────────────────
 
     def download(self, url: str, destination: Path, max_bytes: int) -> int:
-        """Télécharge le fichier d'une tâche, sans jamais dépasser max_bytes sur le disque."""
+        """Télécharge le fichier d'une tâche, sans jamais dépasser max_bytes sur le disque.
+
+        Le journal note le nom du fichier local, sa taille et la durée : jamais le lien signé.
+        """
         written = 0
+        started = time.monotonic()
         try:
             with self._http.stream("GET", url, timeout=httpx.Timeout(30.0)) as response:
                 if response.status_code in (403, 404):
@@ -186,5 +198,14 @@ class HoweClient:
                             raise DownloadRefused("file_too_large", False)
                         handle.write(chunk)
         except httpx.HTTPError as exc:
+            debug("file.download", name=destination.name, bytes=written, error=type(exc).__name__, ms=_ms(started))
             raise DownloadRefused("file_network", True) from exc
+        except DownloadRefused as exc:
+            debug("file.download", name=destination.name, bytes=written, error=exc.code, ms=_ms(started))
+            raise
+        debug("file.download", name=destination.name, bytes=written, ms=_ms(started))
         return written
+
+
+def _ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)

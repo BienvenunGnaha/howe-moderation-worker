@@ -17,6 +17,7 @@ from typing import Any
 
 from .client import DownloadRefused, HoweClient
 from .config import Settings
+from .logs import step
 from .photo_check import Cancelled, TaskFailed, open_checked, read_qr, tesseract_lines, tesseract_version
 
 
@@ -38,11 +39,14 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
             client.download(frame["url"], path, 2 * 1024 * 1024)
         except DownloadRefused as exc:
             raise TaskFailed(exc.code, exc.retryable) from exc
-        image = open_checked(path, settings, limits)
-        plain = workdir / f"frame{index:04d}.png"
-        image.save(plain)
-        lines = tesseract_lines(plain, "frame", settings, should_continue, per_frame, psm=3)
-        qr, qr_engines = read_qr([image])
+        # Une ligne par image en debug : le nombre de lignes lues, jamais leur texte.
+        with step("frame", index=index, at_ms=int(frame.get("at_ms") or 0)) as noted:
+            image = open_checked(path, settings, limits)
+            plain = workdir / f"frame{index:04d}.png"
+            image.save(plain)
+            lines = tesseract_lines(plain, "frame", settings, should_continue, per_frame, psm=3)
+            qr, qr_engines = read_qr([image])
+            noted.update(lines=len(lines), codes=len(qr))
         engines.update(qr_engines)
         results.append({"at_ms": int(frame.get("at_ms") or 0), "text": lines, "qr": qr})
         path.unlink(missing_ok=True)

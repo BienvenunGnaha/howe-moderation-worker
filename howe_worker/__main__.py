@@ -14,8 +14,8 @@ import sys
 from . import VERSION
 from .client import HoweClient, HoweUnavailable, Refused
 from .config import ConfigError, load
-from .logs import log
-from .runner import Runner
+from .logs import error, log
+from .runner import Runner, startup_fields
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = load()
     except ConfigError as exc:
         print(f"Configuration : {exc}", file=sys.stderr)
+        error("worker.config_error", reason=str(exc))
         return 2
     client = HoweClient(settings)
 
@@ -47,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, lambda *_: runner.stopping.set())
     signal.signal(signal.SIGINT, lambda *_: runner.stopping.set())
-    log("worker.started", version=VERSION, capabilities=list(settings.capabilities), slots=settings.slots)
+    log("worker.started", **startup_fields(settings))
     runner.run_forever()
     return 0
 

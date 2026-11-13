@@ -26,6 +26,7 @@ from typing import Any
 
 from PIL import Image
 
+from . import logs
 from .client import DownloadRefused, HoweClient, LeaseLost
 from .config import Settings
 from .photo_check import Cancelled, ProcessFailed, TaskFailed, run_limited
@@ -130,7 +131,10 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
         raise TaskFailed(exc.code, exc.retryable) from exc
     _check_signature(original)
 
-    info = probe(original, settings, should_continue)
+    with logs.step("probe") as noted:
+        info = probe(original, settings, should_continue)
+        noted.update(seconds=round(info["duration"], 1), has_audio=info["has_audio"],
+                     width=(info["video"] or {}).get("width"), height=(info["video"] or {}).get("height"))
     if info["video"] is None:
         raise TaskFailed("video_no_stream", False, "aucune image dans le fichier")
     limit = float((task_input.get("limits") or {}).get("max_video_seconds") or 45.5)
@@ -144,37 +148,46 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
     published = workdir / "published.mp4"
     scale = f"scale=w='min({side},iw)':h='min({side},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
     encode_timeout = max(30.0, float(task_input.get("timeout") or 240) - 60)
-    ffmpeg([*SAFE_INPUT, "-i", str(original), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale,
-            "-fpsmax", str(publish.get("max_fps") or 30), "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast",
-            "-crf", str(publish.get("crf") or 23), "-maxrate", str(publish.get("max_bitrate") or "2500k"), "-bufsize", "5000k",
-            "-c:a", "aac", "-b:a", str(publish.get("audio_bitrate") or "96k"), "-ac", "2",
-            "-movflags", "+faststart", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn", "-threads", "2",
-            str(published)], settings, should_continue, timeout=encode_timeout)
+    with logs.step("encode") as noted:
+        ffmpeg([*SAFE_INPUT, "-i", str(original), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale,
+                "-fpsmax", str(publish.get("max_fps") or 30), "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast",
+                "-crf", str(publish.get("crf") or 23), "-maxrate", str(publish.get("max_bitrate") or "2500k"), "-bufsize", "5000k",
+                "-c:a", "aac", "-b:a", str(publish.get("audio_bitrate") or "96k"), "-ac", "2",
+                "-movflags", "+faststart", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn", "-threads", "2",
+                str(published)], settings, should_continue, timeout=encode_timeout)
+        noted.update(bytes_in=original.stat().st_size, bytes_out=published.stat().st_size)
 
     poster_png = workdir / "poster.png"
     at = min(float(publish.get("poster_at") or 1.0), max(info["duration"] / 2, 0))
-    ffmpeg(["-ss", f"{at:.2f}", *SAFE_INPUT, "-i", str(published), "-frames:v", "1", str(poster_png)], settings, should_continue, timeout=30)
-    poster = workdir / "poster.webp"
-    Image.open(poster_png).convert("RGB").save(poster, "WEBP", quality=80)
+    with logs.step("poster"):
+        ffmpeg(["-ss", f"{at:.2f}", *SAFE_INPUT, "-i", str(published), "-frames:v", "1", str(poster_png)], settings, should_continue, timeout=30)
+        poster = workdir / "poster.webp"
+        Image.open(poster_png).convert("RGB").save(poster, "WEBP", quality=80)
 
     files = ["published.mp4", "poster.webp"]
     if info["has_audio"]:
-        ffmpeg([*SAFE_INPUT, "-i", str(original), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-                str(workdir / "audio.wav")], settings, should_continue, timeout=60)
+        with logs.step("audio"):
+            ffmpeg([*SAFE_INPUT, "-i", str(original), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                    str(workdir / "audio.wav")], settings, should_continue, timeout=60)
         files.append("audio.wav")
 
-    frames = extract_frames(published, workdir, settings, should_continue, task_input.get("frames") or {})
+    with logs.step("frames") as noted:
+        frames = extract_frames(published, workdir, settings, should_continue, task_input.get("frames") or {})
+        noted["kept"] = len(frames)
     files += [frame["name"] for frame in frames]
     out = probe(published, settings, should_continue)["video"] or {}
 
     if task is not None:
-        for name in files:
-            if not should_continue():
-                raise Cancelled()
-            try:
-                client.upload(task["reference"], task["lease_token"], name, workdir / name)
-            except LeaseLost as exc:
-                raise Cancelled() from exc
+        with logs.step("upload") as noted:
+            noted["files"] = len(files)
+            for name in files:
+                if not should_continue():
+                    raise Cancelled()
+                try:
+                    client.upload(task["reference"], task["lease_token"], name, workdir / name)
+                except LeaseLost as exc:
+                    logs.warning("file.upload_refused", name=name)
+                    raise Cancelled() from exc
 
     return {
         "duration_ms": int(round(info["duration"] * 1000)),

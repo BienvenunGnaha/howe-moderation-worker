@@ -22,10 +22,37 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from . import measure, photo_check, video_frames_read, video_prepare, video_transcribe
+from . import VERSION, measure, photo_check, video_frames_read, video_prepare, video_transcribe
 from .client import HoweClient, HoweUnavailable, Refused
 from .config import Settings
-from .logs import log
+from .logs import bound, error, host_of, level_name, log, warning, where
+
+# Sans tâche, une ligne « worker.waiting » toutes les 10 minutes.
+WAITING_NOTE_SECONDS = 600
+
+# Que vérifier quand Howé refuse le travailleur (codes rendus par Howé, section 13).
+REFUSED_HINTS = {
+    "signature": "WORKER_REFERENCE inconnue ou révoquée dans Howé, clé privée qui ne va pas avec, ou horloge décalée de plus de 5 min",
+    "worker_outdated": "version trop ancienne pour Howé : mettre le travailleur à jour",
+}
+
+
+def startup_fields(settings: Settings) -> dict[str, Any]:
+    """Ce qu'il faut savoir d'un travailleur qui démarre, sans secret : l'hôte de Howé (pas
+    l'adresse entière), le début de la référence, les places et les réglages qui comptent."""
+    return {
+        "version": VERSION,
+        "howe": host_of(settings.howe_url),
+        "worker": settings.reference[:8],
+        "capabilities": list(settings.capabilities),
+        "slots": settings.slots,
+        "lease_wait": settings.lease_wait,
+        "whisper": f"{settings.whisper_model}/{settings.whisper_device}/{settings.whisper_compute_type}"
+        if "asr" in settings.capabilities else None,
+        "idle_exit_seconds": settings.idle_exit_seconds or None,
+        "max_run_seconds": settings.max_run_seconds or None,
+        "log_level": level_name(),
+    }
 
 Handler = Callable[..., dict[str, Any]]
 
@@ -64,6 +91,7 @@ class Runner:
         pause = 1.0
         started = time.monotonic()
         last_activity = started
+        last_waiting_note = started
         idle_exit = self.settings.idle_exit_seconds
         max_run = self.settings.max_run_seconds
         with ThreadPoolExecutor(max_workers=self.settings.total_slots) as pool:
@@ -74,32 +102,39 @@ class Runner:
                 if running:
                     last_activity = now
                 if max_run and now - started >= max_run:
-                    log("worker.max_run_reached", running=len(running))
+                    warning("worker.max_run_reached", running=len(running), max_run_seconds=max_run)
                     break
                 if idle_exit and not running and now - last_activity >= idle_exit:
                     log("worker.idle_exit", idle_seconds=int(now - last_activity))
                     break
+                # Sur un serveur, une ligne de temps en temps prouve que le travailleur vit, même sans tâche.
+                if not running and now - last_activity >= WAITING_NOTE_SECONDS and now - last_waiting_note >= WAITING_NOTE_SECONDS:
+                    log("worker.waiting", idle_seconds=int(now - last_activity), done=sum(self.outcomes.values()))
+                    last_waiting_note = now
                 free = self._free_capabilities()
                 if not free:
                     time.sleep(0.5)
                     continue
                 try:
                     tasks = self.client.lease(list(free), sum(free.values()), self.settings.lease_wait)
+                    if pause > 1.0:
+                        log("worker.howe_back", after_seconds=int(pause))
                     pause = 1.0
                 except Refused as exc:
                     # Signature refusée, révoqué ou version trop ancienne : inutile d'insister vite.
-                    log("worker.refused", status=exc.status, code=exc.code)
+                    error("worker.refused", status=exc.status, code=exc.code, hint=REFUSED_HINTS.get(exc.code or str(exc.status)))
                     if idle_exit:
                         break  # sur RunPod, attendre coûterait du temps de GPU pour rien
                     self.stopping.wait(60)
                     continue
                 except HoweUnavailable as exc:
-                    log("worker.howe_unavailable", reason=str(exc))
+                    warning("worker.howe_unavailable", reason=str(exc), retry_in_seconds=int(pause))
                     self.stopping.wait(pause)
                     pause = min(pause * 2, 60.0)
                     continue
                 if tasks:
                     last_activity = time.monotonic()
+                    log("tasks.leased", count=len(tasks), kinds=sorted(t["kind"] for t in tasks), free=free)
                 for task in tasks:
                     self._reserve(task)
                     future = pool.submit(self.process, task)
@@ -107,7 +142,7 @@ class Runner:
                     running.add(future)
                 running = {f for f in running if not f.done()}
             log("worker.draining", running=len(running))
-        log("worker.stopped")
+        log("worker.stopped", uptime_seconds=int(time.monotonic() - started), outcomes=dict(self.outcomes))
 
     def run_once(self) -> int:
         """Une seule prise de tâches, traitées à la suite (essais, mise en service)."""
@@ -120,6 +155,11 @@ class Runner:
     # ── Une tâche ────────────────────────────────────────────────────────────
 
     def process(self, task: dict[str, Any]) -> str:
+        # Chaque ligne écrite pendant la tâche (téléchargements, étapes) porte sa référence et son type.
+        with bound(task=task["reference"], kind=task["kind"]):
+            return self._process(task)
+
+    def _process(self, task: dict[str, Any]) -> str:
         reference, token, kind = task["reference"], task["lease_token"], task["kind"]
         cancelled = threading.Event()
         done = threading.Event()
@@ -130,6 +170,8 @@ class Runner:
         measured = measure.start()
         frames_read: int | None = None
         outcome = "succeeded"
+        failure: dict[str, Any] = {}
+        log("task.started", task=reference, kind=kind, lease_expires_at=task.get("lease_expires_at"))
 
         def metrics() -> dict[str, int]:
             # Rendues à Howé (0.3.0) : jamais de texte lu, seulement des nombres.
@@ -143,6 +185,7 @@ class Runner:
         try:
             handler = self.handlers.get(kind)
             if handler is None:
+                warning("task.kind_unsupported", task=reference, kind=kind, version=VERSION)
                 self.client.fail(reference, token, "kind_unsupported", False, kind)
                 outcome = "unsupported"
                 return outcome
@@ -158,18 +201,24 @@ class Runner:
             outcome = "cancelled"
         except photo_check.TaskFailed as exc:
             outcome = "failed"
+            # Le détail vient du travailleur lui-même (« code 137 », « 4000x3000 », un type d'erreur) : jamais de texte lu.
+            failure = {"code": exc.code, "retryable": exc.retryable, "detail": exc.detail}
             self._safe_fail(reference, token, exc.code, exc.retryable, exc.detail, metrics())
         except (HoweUnavailable, Refused) as exc:
             # Howé injoignable au moment de rendre : le bail expirera, la tâche reviendra dans la file.
             outcome = "unreported"
-            log("task.unreported", task=reference, reason=str(exc))
+            warning("task.unreported", task=reference, reason=str(exc))
         except Exception as exc:  # noqa: BLE001 — une tâche ne fait jamais tomber le travailleur
             outcome = "failed"
+            failure = {"code": "worker_error", "retryable": True, "detail": type(exc).__name__}
+            # Le type et l'endroit de l'erreur, pas son message (il peut contenir un lien signé).
+            error("task.crashed", task=reference, kind=kind, error=type(exc).__name__, where=where(exc))
             self._safe_fail(reference, token, "worker_error", True, type(exc).__name__, metrics())
         finally:
             done.set()
             shutil.rmtree(workdir, ignore_errors=True)
-            log("task.finished", task=reference, kind=kind, outcome=outcome, **metrics())
+            level = "warning" if outcome in ("failed", "stale", "unreported", "unsupported") else "info"
+            log("task.finished", level, task=reference, kind=kind, outcome=outcome, **failure, **metrics())
             with self._lock:
                 self.outcomes[outcome] += 1
         return outcome
@@ -178,17 +227,20 @@ class Runner:
         while not done.wait(self.settings.heartbeat_seconds):
             try:
                 if not self.client.heartbeat(reference, token):
+                    log("task.cancelled_by_howe", task=reference)
                     cancelled.set()
                     return
-            except (HoweUnavailable, Refused):
-                continue  # le prochain battement réessaiera ; au pire, le bail expire
+            except (HoweUnavailable, Refused) as exc:
+                # Le prochain battement réessaiera ; au pire, le bail expire et la tâche revient dans la file.
+                warning("task.heartbeat_failed", task=reference, reason=str(exc))
+                continue
 
     def _safe_fail(self, reference: str, token: str, code: str, retryable: bool, detail: str | None,
                    metrics: dict[str, int] | None = None) -> None:
         try:
             self.client.fail(reference, token, code, retryable, detail, metrics)
         except (HoweUnavailable, Refused) as exc:
-            log("task.unreported", task=reference, reason=str(exc))
+            warning("task.unreported", task=reference, reason=str(exc))
 
     # ── Places ───────────────────────────────────────────────────────────────
 

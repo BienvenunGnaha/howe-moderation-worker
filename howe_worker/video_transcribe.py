@@ -19,6 +19,7 @@ from typing import Any
 
 from .client import DownloadRefused, HoweClient
 from .config import Settings
+from .logs import step
 from .photo_check import Cancelled, TaskFailed
 
 _model = None
@@ -74,20 +75,27 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
     if not should_continue():
         raise Cancelled()
 
-    whisper = model(settings)
+    # Le premier appel charge le modèle (plusieurs secondes) ; les suivants le trouvent en mémoire.
+    with step("model", loaded=_model is not None):
+        whisper = model(settings)
     samples = read_wav(audio)
     deadline = time.monotonic() + float(task_input.get("timeout") or 360) - 20
+    waited = time.monotonic()
     with _model_lock:  # un seul passage à la fois dans le modèle chargé
-        segments, info = whisper.transcribe(samples, beam_size=5, vad_filter=True, condition_on_previous_text=False)
-        result = []
-        for segment in segments:  # les segments arrivent au fil du calcul : on peut s'arrêter entre deux
-            if not should_continue():
-                raise Cancelled()
-            if time.monotonic() > deadline:
-                raise TaskFailed("asr_timeout", True)
-            text = segment.text.strip()
-            if text:
-                result.append({"start_ms": int(segment.start * 1000), "end_ms": int(segment.end * 1000), "text": text[:1000]})
+        # Le journal compte les segments et la langue, jamais les paroles.
+        with step("transcribe", audio_seconds=round(len(samples) / 16000, 1), lock_wait_ms=int((time.monotonic() - waited) * 1000),
+                  device=settings.whisper_device) as noted:
+            segments, info = whisper.transcribe(samples, beam_size=5, vad_filter=True, condition_on_previous_text=False)
+            result = []
+            for segment in segments:  # les segments arrivent au fil du calcul : on peut s'arrêter entre deux
+                if not should_continue():
+                    raise Cancelled()
+                if time.monotonic() > deadline:
+                    raise TaskFailed("asr_timeout", True)
+                text = segment.text.strip()
+                if text:
+                    result.append({"start_ms": int(segment.start * 1000), "end_ms": int(segment.end * 1000), "text": text[:1000]})
+            noted.update(segments=len(result), language=info.language)
 
     try:
         from faster_whisper import __version__ as version

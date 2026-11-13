@@ -35,6 +35,28 @@ Avec chaque résultat ou échec, le travailleur rend des nombres, jamais du text
 
 Les mêmes nombres figurent dans la ligne `task.finished` du journal.
 
+## Le journal (version 0.4.1)
+
+Une ligne JSON par événement, sur la sortie standard : `journalctl -u howe-moderation-worker` sur un serveur, onglet « Logs » de l'endpoint sur RunPod. Chaque ligne porte `ts`, `level` et `event` ; pendant une tâche, aussi `task` (sa référence) et `kind`.
+
+**`LOG_LEVEL=info`** (par défaut) : la vie du travailleur et de chaque tâche.
+
+| Événement | Quand |
+|---|---|
+| `worker.started`, `worker.woken` | démarrage (serveur) ou réveil (RunPod) : version, hôte de Howé, début de la référence, compétences, places, Whisper |
+| `worker.container_started`, `worker.gpu`, `worker.warmed` | RunPod : conteneur lancé, GPU vus, Whisper chargé et en combien de temps |
+| `tasks.leased` | des tâches prises : combien, de quels types |
+| `task.started`, `task.finished` | début et fin d'une tâche : issue, code d'échec, durée, mémoire |
+| `task.cancelled_by_howe` | Howé a annulé la tâche (annonce retirée, nouvelle version…) |
+| `worker.waiting` | toutes les 10 minutes sans tâche : le travailleur est vivant |
+| `worker.idle_exit`, `worker.wake_done`, `worker.stopped` | arrêt, avec le bilan des tâches et la durée |
+
+Toujours écrits, quel que soit le niveau : `warning` (Howé injoignable, battement de cœur manqué, résultat non rendu, tâche en échec) et `error` (travailleur refusé, avec ce qu'il faut vérifier ; erreur de configuration ; `task.crashed`, avec le type de l'erreur et l'endroit du code où elle est née).
+
+**`LOG_LEVEL=debug`** : en plus, chaque appel à Howé (`howe.call` : méthode, chemin, statut, durée), chaque fichier lu ou déposé (`file.download`, `file.upload` : nom, taille, durée) et chaque étape d'une tâche (`step.done` / `step.failed` : ouverture, lectures Tesseract, QR codes, sondage, encodage, aperçu, son, images, transcription…, avec leur durée et des nombres). Pour chercher une panne ou une lenteur, puis revenir à `info` : une vidéo écrit plus de 100 lignes.
+
+**Ce qui n'est jamais écrit** : le texte lu, les paroles transcrites, le contenu des QR codes, les liens signés (ni leur adresse ni leurs paramètres), le jeton du bail, la clé privée. Le message d'une erreur inattendue non plus, car il peut contenir une adresse : seulement son type et l'endroit.
+
 ## Spécialiser un serveur
 
 Un serveur ne prend que ce qu'il annonce (`CAPABILITIES`) et ce que Howé lui a permis à l'inscription (`--capabilities`). Un serveur modeste : `image`. Un serveur avec plus de mémoire : `video,asr` (ou les trois). C'est le seul réglage à changer ; ajouter un serveur ne touche pas Howé.
