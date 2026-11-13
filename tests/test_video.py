@@ -111,6 +111,8 @@ def test_broken_and_disguised_files_are_refused(settings: Settings, tmp_path: Pa
     with pytest.raises(TaskFailed) as caught:
         prepare(settings, broken)
     assert (caught.value.code, caught.value.retryable) == ("video_unreadable", False)
+    # Le détail dit pourquoi (13/11/2026) : le programme, son code de sortie et sa dernière erreur.
+    assert re.match(r"^ffprobe code \d+ : .+", caught.value.detail), caught.value.detail
 
     # Une liste de lecture HLS déguisée en MP4 (elle lirait /etc/passwd) : refusée sans être ouverte.
     playlist = tmp_path / "piege.mp4"
@@ -118,6 +120,50 @@ def test_broken_and_disguised_files_are_refused(settings: Settings, tmp_path: Pa
     with pytest.raises(TaskFailed) as caught:
         prepare(settings, playlist)
     assert caught.value.code == "file_unsupported"
+
+
+def test_ffmpeg_never_uses_one_thread_per_core(settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sur RunPod (32 cœurs et plus), FFmpeg lançait un fil par cœur et dépassait le plafond de
+    mémoire de la tâche : la vidéo de l'annonce 38 était dite illisible (13/11/2026)."""
+    from howe_worker import photo_check
+
+    launched: list[tuple[list[str], dict[str, str]]] = []
+    real = photo_check.MeasuredPopen
+
+    class Spy(real):  # type: ignore[misc, valid-type]
+        def __init__(self, command, **kwargs):
+            launched.append((list(command), dict(kwargs.get("env") or {})))
+            super().__init__(command, **kwargs)
+
+    monkeypatch.setattr(photo_check, "MeasuredPopen", Spy)
+    prepare(settings, make_clip(tmp_path / "salon.mp4"))
+
+    ffmpeg = [(c, e) for c, e in launched if Path(c[0]).name == "ffmpeg"]
+    assert len(ffmpeg) == 4  # encodage, aperçu, son, images
+    for command, env in ffmpeg:
+        before_input = command[:command.index("-i")]
+        assert before_input[before_input.index("-threads") + 1] == "2", command
+        assert command[command.index("-filter_threads") + 1] == "2"
+        assert command[-3:-1] == ["-threads", "2"], command  # sortie
+        assert env["MALLOC_ARENA_MAX"] == "2"
+    # Sans fichier pour sa sortie d'erreur, FFmpeg n'écrit que ses erreurs (pas les métadonnées, position GPS comprise).
+    assert sum("error" in c[c.index("-v") + 1:c.index("-v") + 2] for c, _ in ffmpeg if "-v" in c) == 3
+
+
+def test_a_failing_ffmpeg_says_why(settings: Settings, tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    # Un FFmpeg qui échoue comme sur RunPod le 13/11/2026 : le détail rend son code et sa dernière erreur.
+    fake = tmp_path / "ffmpeg-en-echec"
+    fake.write_text("#!/bin/sh\necho 'Error while filtering: Generic error in an external library' >&2\nexit 187\n")
+    fake.chmod(0o755)
+    clip = make_clip(tmp_path / "salon.mp4")
+
+    with pytest.raises(TaskFailed) as caught:
+        prepare(replace(settings, ffmpeg_cmd=str(fake)), clip)
+
+    assert (caught.value.code, caught.value.retryable) == ("video_unreadable", False)
+    assert caught.value.detail == "ffmpeg code 187 : Error while filtering: Generic error in an external library"
 
 
 def test_a_cancelled_preparation_stops(settings: Settings, tmp_path: Path) -> None:

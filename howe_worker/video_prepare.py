@@ -34,6 +34,11 @@ from .photo_check import Cancelled, ProcessFailed, TaskFailed, run_limited
 # Seuls les démultiplexeurs des formats acceptés par Howé ; ni HLS, ni concat, ni URL.
 FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm"
 SAFE_INPUT = ["-protocol_whitelist", "file", "-format_whitelist", FORMATS]
+# Entrée de FFmpeg : 2 fils de décodage, quel que soit le nombre de cœurs. Sans cela, FFmpeg en lance
+# un par cœur, et sur une machine RunPod (32 cœurs et plus) il dépasse le plafond de mémoire de la
+# tâche et échoue : c'était le « video_unreadable » des vidéos de l'annonce 38 (13/11/2026).
+THREADS = "2"
+FFMPEG_INPUT = [*SAFE_INPUT, "-threads", THREADS]
 
 
 def _check_signature(path: Path) -> None:
@@ -52,7 +57,7 @@ def probe(path: Path, settings: Settings, should_continue: Callable[[], bool]) -
     except ProcessFailed as exc:
         if exc.killed:
             raise TaskFailed("probe_failed", True, exc.detail) from exc
-        raise TaskFailed("video_unreadable", False) from exc
+        raise TaskFailed("video_unreadable", False, f"ffprobe {exc.detail}") from exc
     except TaskFailed as exc:
         if exc.code == "probe_timeout":
             raise TaskFailed("video_unreadable", False, "ffprobe trop long") from exc
@@ -72,12 +77,19 @@ def probe(path: Path, settings: Settings, should_continue: Callable[[], bool]) -
 
 def ffmpeg(args: list[str], settings: Settings, should_continue: Callable[[], bool], timeout: float,
            stderr_file: Path | None = None) -> None:
+    # Sans fichier pour sa sortie d'erreur, FFmpeg n'écrit que ses erreurs (jamais les métadonnées
+    # du fichier, position GPS du téléphone comprise) ; elles expliquent un échec.
+    quiet = [] if stderr_file else ["-v", "error"]
+    # 2 fils aussi pour les filtres et l'encodage de la sortie (le dernier argument est le fichier produit).
+    *options, output = args
     try:
-        run_limited([settings.ffmpeg_cmd, "-hide_banner", "-nostdin", "-y", *args], settings, should_continue,
-                    timeout=timeout, stderr_file=stderr_file, memory_mb=settings.video_memory_mb, failure_code="encode_failed")
+        run_limited([settings.ffmpeg_cmd, "-hide_banner", "-nostdin", "-y", *quiet, "-filter_threads", THREADS, *options,
+                     "-threads", THREADS, output],
+                    settings, should_continue, timeout=timeout, stderr_file=stderr_file, memory_mb=settings.video_memory_mb,
+                    failure_code="encode_failed")
     except ProcessFailed as exc:
         # Tué (mémoire, temps) : panne, réessayée. Sorti en erreur : la vidéo n'a pas pu être lue.
-        raise TaskFailed("encode_failed", True, exc.detail) if exc.killed else TaskFailed("video_unreadable", False) from exc
+        raise TaskFailed("encode_failed", True, exc.detail) if exc.killed else TaskFailed("video_unreadable", False, f"ffmpeg {exc.detail}") from exc
 
 
 def dhash(path: Path) -> int:
@@ -100,7 +112,7 @@ def extract_frames(published: Path, workdir: Path, settings: Settings, should_co
     step = 1 / max(float(options.get("per_second") or 2), 0.1)
     scene = float(options.get("scene") or 0.3)
     select = f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{step:.3f})+gt(scene\\,{scene})',showinfo"
-    ffmpeg([*SAFE_INPUT, "-i", str(published), "-vf", select, "-fps_mode", "vfr", "-q:v", "3", str(raw / "r%04d.jpg")],
+    ffmpeg([*FFMPEG_INPUT, "-i", str(published), "-vf", select, "-fps_mode", "vfr", "-q:v", "3", str(raw / "r%04d.jpg")],
            settings, should_continue, timeout=90, stderr_file=log)
 
     times = [float(t) for t in re.findall(r"pts_time:\s*([0-9.]+)", log.read_text(errors="replace"))]
@@ -149,25 +161,25 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
     scale = f"scale=w='min({side},iw)':h='min({side},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
     encode_timeout = max(30.0, float(task_input.get("timeout") or 240) - 60)
     with logs.step("encode") as noted:
-        ffmpeg([*SAFE_INPUT, "-i", str(original), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale,
+        ffmpeg([*FFMPEG_INPUT, "-i", str(original), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale,
                 "-fpsmax", str(publish.get("max_fps") or 30), "-c:v", "libx264", "-profile:v", "high", "-preset", "veryfast",
                 "-crf", str(publish.get("crf") or 23), "-maxrate", str(publish.get("max_bitrate") or "2500k"), "-bufsize", "5000k",
                 "-c:a", "aac", "-b:a", str(publish.get("audio_bitrate") or "96k"), "-ac", "2",
-                "-movflags", "+faststart", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn", "-threads", "2",
+                "-movflags", "+faststart", "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
                 str(published)], settings, should_continue, timeout=encode_timeout)
         noted.update(bytes_in=original.stat().st_size, bytes_out=published.stat().st_size)
 
     poster_png = workdir / "poster.png"
     at = min(float(publish.get("poster_at") or 1.0), max(info["duration"] / 2, 0))
     with logs.step("poster"):
-        ffmpeg(["-ss", f"{at:.2f}", *SAFE_INPUT, "-i", str(published), "-frames:v", "1", str(poster_png)], settings, should_continue, timeout=30)
+        ffmpeg(["-ss", f"{at:.2f}", *FFMPEG_INPUT, "-i", str(published), "-frames:v", "1", str(poster_png)], settings, should_continue, timeout=30)
         poster = workdir / "poster.webp"
         Image.open(poster_png).convert("RGB").save(poster, "WEBP", quality=80)
 
     files = ["published.mp4", "poster.webp"]
     if info["has_audio"]:
         with logs.step("audio"):
-            ffmpeg([*SAFE_INPUT, "-i", str(original), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+            ffmpeg([*FFMPEG_INPUT, "-i", str(original), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
                     str(workdir / "audio.wav")], settings, should_continue, timeout=60)
         files.append("audio.wav")
 

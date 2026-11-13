@@ -69,17 +69,20 @@ def run_limited(command: list[str], settings: Settings, should_continue: Callabl
     """Lance un programme limité, et le tue si la tâche est annulée ou trop longue.
 
     stderr_file : où écrire sa sortie d'erreur (FFmpeg y donne l'instant de chaque image).
+    Sans lui, la sortie d'erreur est gardée en mémoire : ses dernières lignes expliquent un échec.
     """
-    stderr = stderr_file.open("wb") if stderr_file else subprocess.DEVNULL
+    stderr = stderr_file.open("wb") if stderr_file else subprocess.PIPE
     process = MeasuredPopen(
         command,
         stdout=subprocess.PIPE,
         stderr=stderr,
         preexec_fn=_limits(memory_mb or settings.task_memory_mb, settings.task_cpu_seconds),
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "OMP_THREAD_LIMIT": "1", "LC_ALL": "C.UTF-8"},
+        # MALLOC_ARENA_MAX : sans lui, chaque fil d'exécution réserve sa propre zone de mémoire ; sur une
+        # machine à 32 cœurs et plus (RunPod), FFmpeg dépasse le plafond d'adresses et échoue (13/11/2026).
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "OMP_THREAD_LIMIT": "1", "LC_ALL": "C.UTF-8", "MALLOC_ARENA_MAX": "2"},
     )
     try:
-        return _wait(process, command, should_continue, timeout, failure_code)
+        return _wait(process, command, should_continue, timeout, failure_code, stderr_file)
     finally:
         # Mesure de la tâche (section 16), même pour un programme arrêté ou en échec.
         measure.note_tool(process.max_rss_kb)
@@ -87,11 +90,12 @@ def run_limited(command: list[str], settings: Settings, should_continue: Callabl
             stderr.close()
 
 
-def _wait(process: subprocess.Popen, command: list[str], should_continue: Callable[[], bool], timeout: float, failure_code: str) -> str:
+def _wait(process: subprocess.Popen, command: list[str], should_continue: Callable[[], bool], timeout: float, failure_code: str,
+          stderr_file: Path | None = None) -> str:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            out, _ = process.communicate(timeout=0.5)
+            out, err = process.communicate(timeout=0.5)
             break
         except subprocess.TimeoutExpired:
             if not should_continue():
@@ -105,15 +109,36 @@ def _wait(process: subprocess.Popen, command: list[str], should_continue: Callab
     if process.returncode != 0:
         # Tué par un signal (mémoire ou temps processeur épuisés) : panne, réessayée.
         # Sorti en erreur : le programme n'a pas su lire le fichier.
-        raise ProcessFailed(failure_code, process.returncode)
+        raise ProcessFailed(failure_code, process.returncode, _error_tail(err, stderr_file))
     return out.decode("utf-8", errors="replace")
 
 
-class ProcessFailed(TaskFailed):
-    """Un programme sorti en erreur ; returncode négatif = tué par un signal (mémoire, temps)."""
+def _error_tail(err: bytes | None, stderr_file: Path | None) -> str:
+    """Les deux dernières lignes d'erreur d'un programme, pour comprendre un échec.
 
-    def __init__(self, code: str, returncode: int):
-        super().__init__(code, True, f"code {returncode}")
+    FFmpeg et ffprobe tournent en « -v error » (sans les métadonnées du fichier, position GPS
+    comprise) ; quand la sortie va dans un fichier en niveau normal (images d'une vidéo), seules
+    les lignes qui parlent d'erreur sont gardées.
+    """
+    if stderr_file is not None:
+        try:
+            lines = [l for l in stderr_file.read_text(errors="replace").splitlines() if "error" in l.lower()]
+        except OSError:
+            lines = []
+    else:
+        lines = (err or b"").decode("utf-8", errors="replace").splitlines()
+    lines = [" ".join(l.split()) for l in lines if l.strip()]
+    return " | ".join(lines[-2:])[:180]
+
+
+class ProcessFailed(TaskFailed):
+    """Un programme sorti en erreur ; returncode négatif = tué par un signal (mémoire, temps).
+
+    Le détail porte le code de sortie et les dernières lignes d'erreur du programme.
+    """
+
+    def __init__(self, code: str, returncode: int, errors: str = ""):
+        super().__init__(code, True, f"code {returncode}" + (f" : {errors}" if errors else ""))
         self.returncode = returncode
 
     @property

@@ -9,4 +9,6 @@ signé, rend ce qu'il a lu. Howé applique ses règles et tranche.
 # 0.3.0 (lot 5) : les mesures de chaque tâche (durée, mémoire, images lues) rendues à Howé.
 # 0.4.0 (lot 6) : RunPod Serverless (point d'entrée, arrêt quand il n'y a plus de tâche, Whisper sur GPU).
 # 0.4.1 (13/11/2026) : journal détaillé en info (chaque étape et chaque appel, avec sa durée).
-VERSION = "0.4.1"
+# 0.4.2 (13/11/2026) : FFmpeg limité à 2 fils et MALLOC_ARENA_MAX=2 (vidéos dites illisibles sur RunPod,
+#   machines à nombreux cœurs) ; le détail d'un échec rend la dernière erreur de FFmpeg ou ffprobe.
+VERSION = "0.4.2"
