@@ -1,5 +1,6 @@
 # Transcription des paroles (compétence « asr ») : seulement sur les serveurs qui l'annoncent.
 -r requirements.txt
 faster-whisper==1.1.1
-# Importé par faster-whisper 1.1.1 sans être déclaré dans ses dépendances.
-requests==2.32.3
+# Importé par faster-whisper 1.1.1 sans être déclaré dans ses dépendances. 2.34.2 au moins :
+# le SDK RunPod 1.12.0 (image du lot 6) l'exige (construction RunPod du 13/11/2026 en échec avec 2.32.3).
+requests==2.34.2
