@@ -21,8 +21,8 @@ SIGNED = "https://howe.test/api/moderation/v1/files/abc?expires=1700000000&signa
 
 
 @pytest.fixture
-def debug_level() -> Iterator[None]:
-    logs.set_level("debug")
+def warning_level() -> Iterator[None]:
+    logs.set_level("warning")
     yield
     logs.set_level("info")
 
@@ -31,7 +31,7 @@ def lines(out: str) -> list[dict]:
     return [json.loads(line) for line in out.splitlines() if line.startswith("{")]
 
 
-def test_in_debug_each_step_of_a_task_is_timed_and_tied_to_the_task(settings: Settings, tmp_path: Path, capsys, debug_level) -> None:
+def test_by_default_each_step_of_a_task_is_timed_and_tied_to_the_task(settings: Settings, tmp_path: Path, capsys) -> None:
     howe = FakeHowe({"photo": sign_photo(tmp_path / "panneau.png", "A LOUER 97 45 32 21")})
 
     Runner(settings, howe).process(task("t-42"))  # type: ignore[arg-type]
@@ -45,17 +45,18 @@ def test_in_debug_each_step_of_a_task_is_timed_and_tied_to_the_task(settings: Se
     assert all(r["task"] == "t-42" and r["kind"] == "photo_check" for r in records)
     assert all(isinstance(r["ms"], int) for r in records if r["event"] == "step.done")
     tesseract = next(r for r in records if r.get("step") == "tesseract")
-    assert tesseract["lines"] > 0 and tesseract["level"] == "debug"
+    assert tesseract["lines"] > 0 and tesseract["level"] == "info"
 
 
-def test_at_the_default_level_only_the_life_of_the_task_is_written(settings: Settings, tmp_path: Path, capsys) -> None:
+def test_at_the_warning_level_only_the_problems_are_written(settings: Settings, tmp_path: Path, capsys, warning_level) -> None:
     howe = FakeHowe({"photo": sign_photo(tmp_path / "panneau.png", "A LOUER")})
 
-    Runner(settings, howe).process(task())  # type: ignore[arg-type]
+    Runner(settings, howe).process(task("t-1"))  # type: ignore[arg-type]
+    Runner(settings, FakeHowe()).process(task("t-2", url="absente"))  # type: ignore[arg-type]
 
     records = lines(capsys.readouterr().out)
-    assert [r["event"] for r in records] == ["task.started", "task.finished"]
-    assert records[1]["outcome"] == "succeeded" and records[1]["level"] == "info"
+    assert [(r["event"], r["task"]) for r in records] == [("task.crashed", "t-2"), ("task.finished", "t-2")]
+    assert {r["level"] for r in records} == {"error", "warning"}
 
 
 def test_a_failure_says_its_code_and_a_crash_says_where_but_never_its_message(settings: Settings, capsys) -> None:
@@ -92,15 +93,19 @@ def test_the_cancellation_by_howe_is_written(settings: Settings, tmp_path: Path,
     assert records[-1]["outcome"] == "cancelled"
 
 
-def test_calls_and_downloads_are_logged_without_the_link_or_the_lease(settings: Settings, tmp_path: Path, capsys, debug_level) -> None:
+def test_calls_and_downloads_are_logged_without_the_link_or_the_lease(settings: Settings, tmp_path: Path, capsys) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/heartbeat"):
             return httpx.Response(200, json={"continue": True})
+        if request.url.path.endswith("/tasks/lease"):
+            return httpx.Response(204)
         return httpx.Response(200, content=b"x" * 2048)
 
     client = HoweClient(settings, httpx.Client(base_url=settings.howe_url, transport=httpx.MockTransport(handler)))
     client.download(SIGNED, tmp_path / "original", 10_000)
     client.heartbeat("t-9", "jeton-secret-du-bail")
+    # Une demande restée vide n'est pas écrite : sans travail, elle revient toutes les 20 s.
+    assert client.lease(["image"], 1, 0) == []
 
     out = capsys.readouterr().out
     assert "signature=" not in out and "expires=" not in out and "jeton-secret" not in out

@@ -39,7 +39,7 @@ def run(task_input: dict[str, Any], workdir: Path, client: HoweClient, settings:
             client.download(frame["url"], path, 2 * 1024 * 1024)
         except DownloadRefused as exc:
             raise TaskFailed(exc.code, exc.retryable) from exc
-        # Une ligne par image en debug : le nombre de lignes lues, jamais leur texte.
+        # Une ligne par image : le nombre de lignes lues, jamais leur texte.
         with step("frame", index=index, at_ms=int(frame.get("at_ms") or 0)) as noted:
             image = open_checked(path, settings, limits)
             plain = workdir / f"frame{index:04d}.png"

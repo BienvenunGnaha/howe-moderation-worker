@@ -24,7 +24,7 @@ from nacl.signing import SigningKey
 
 from . import VERSION
 from .config import Settings
-from .logs import debug
+from .logs import log
 
 API_PREFIX = "/api/moderation/v1"
 
@@ -93,10 +93,13 @@ class HoweClient:
         try:
             response = self._http.request(method, full, content=body, headers=self.signed_headers(method, full, body))
         except httpx.HTTPError as exc:
-            debug("howe.call", method=method, path=path, error=type(exc).__name__, ms=_ms(started))
+            log("howe.call", method=method, path=path, error=type(exc).__name__, ms=_ms(started))
             raise HoweUnavailable(type(exc).__name__) from exc
         # Le chemin seul : il ne porte que la référence de la tâche, jamais le bail ni la signature.
-        debug("howe.call", method=method, path=path, status=response.status_code, ms=_ms(started))
+        # Une demande de tâche restée vide (204) n'est pas écrite : sans travail, elle revient toutes
+        # les 20 s ; « worker.waiting » dit déjà que le travailleur vit.
+        if not (path == "/tasks/lease" and response.status_code == 204):
+            log("howe.call", method=method, path=path, status=response.status_code, ms=_ms(started))
         if response.status_code == 401:
             raise Refused(401, "signature")
         if response.status_code >= 500:
@@ -161,9 +164,9 @@ class HoweClient:
         try:
             response = self._http.put(full, content=body, headers=headers, timeout=httpx.Timeout(120.0))
         except httpx.HTTPError as exc:
-            debug("file.upload", task=reference, name=name, bytes=len(body), error=type(exc).__name__, ms=_ms(started))
+            log("file.upload", task=reference, name=name, bytes=len(body), error=type(exc).__name__, ms=_ms(started))
             raise HoweUnavailable(type(exc).__name__) from exc
-        debug("file.upload", task=reference, name=name, bytes=len(body), status=response.status_code, ms=_ms(started))
+        log("file.upload", task=reference, name=name, bytes=len(body), status=response.status_code, ms=_ms(started))
         if response.status_code == 401:
             raise Refused(401, "signature")
         if response.status_code in (400, 409):
@@ -198,12 +201,12 @@ class HoweClient:
                             raise DownloadRefused("file_too_large", False)
                         handle.write(chunk)
         except httpx.HTTPError as exc:
-            debug("file.download", name=destination.name, bytes=written, error=type(exc).__name__, ms=_ms(started))
+            log("file.download", name=destination.name, bytes=written, error=type(exc).__name__, ms=_ms(started))
             raise DownloadRefused("file_network", True) from exc
         except DownloadRefused as exc:
-            debug("file.download", name=destination.name, bytes=written, error=exc.code, ms=_ms(started))
+            log("file.download", name=destination.name, bytes=written, error=exc.code, ms=_ms(started))
             raise
-        debug("file.download", name=destination.name, bytes=written, ms=_ms(started))
+        log("file.download", name=destination.name, bytes=written, ms=_ms(started))
         return written
 
 

@@ -39,7 +39,9 @@ Les mêmes nombres figurent dans la ligne `task.finished` du journal.
 
 Une ligne JSON par événement, sur la sortie standard : `journalctl -u howe-moderation-worker` sur un serveur, onglet « Logs » de l'endpoint sur RunPod. Chaque ligne porte `ts`, `level` et `event` ; pendant une tâche, aussi `task` (sa référence) et `kind`.
 
-**`LOG_LEVEL=info`** (par défaut) : la vie du travailleur et de chaque tâche.
+**`LOG_LEVEL=info`** (par défaut) : tout le détail. `warning` ou `error` pour n'écrire que les avertissements, ou que les erreurs.
+
+La vie du travailleur et de chaque tâche :
 
 | Événement | Quand |
 |---|---|
@@ -51,9 +53,24 @@ Une ligne JSON par événement, sur la sortie standard : `journalctl -u howe-mod
 | `worker.waiting` | toutes les 10 minutes sans tâche : le travailleur est vivant |
 | `worker.idle_exit`, `worker.wake_done`, `worker.stopped` | arrêt, avec le bilan des tâches et la durée |
 
-Toujours écrits, quel que soit le niveau : `warning` (Howé injoignable, battement de cœur manqué, résultat non rendu, tâche en échec) et `error` (travailleur refusé, avec ce qu'il faut vérifier ; erreur de configuration ; `task.crashed`, avec le type de l'erreur et l'endroit du code où elle est née).
+Le détail de chaque tâche, au même niveau :
 
-**`LOG_LEVEL=debug`** : en plus, chaque appel à Howé (`howe.call` : méthode, chemin, statut, durée), chaque fichier lu ou déposé (`file.download`, `file.upload` : nom, taille, durée) et chaque étape d'une tâche (`step.done` / `step.failed` : ouverture, lectures Tesseract, QR codes, sondage, encodage, aperçu, son, images, transcription…, avec leur durée et des nombres). Pour chercher une panne ou une lenteur, puis revenir à `info` : une vidéo écrit plus de 100 lignes.
+- chaque appel à Howé (`howe.call` : méthode, chemin, statut, durée). Seule exception : une demande de tâche restée vide n'est pas écrite. Sans travail, elle revient toutes les 20 s ; `worker.waiting` suffit ;
+- chaque fichier lu ou déposé (`file.download`, `file.upload` : nom, taille, durée) ;
+- chaque étape d'une tâche (`step.done` / `step.failed`), avec sa durée et des nombres :
+  - photo : ouverture, lectures Tesseract, QR codes ;
+  - vidéo : sondage, encodage, aperçu, son, images ;
+  - transcription.
+
+  Une vidéo écrit plus de 100 lignes.
+
+Les avertissements (`warning`) : Howé injoignable, battement de cœur manqué, résultat non rendu, tâche en échec.
+
+Les erreurs (`error`) :
+
+- travailleur refusé, avec ce qu'il faut vérifier ;
+- erreur de configuration ;
+- `task.crashed`, avec le type de l'erreur et l'endroit du code où elle est née.
 
 **Ce qui n'est jamais écrit** : le texte lu, les paroles transcrites, le contenu des QR codes, les liens signés (ni leur adresse ni leurs paramètres), le jeton du bail, la clé privée. Le message d'une erreur inattendue non plus, car il peut contenir une adresse : seulement son type et l'endroit.
 

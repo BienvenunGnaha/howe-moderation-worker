@@ -3,13 +3,14 @@
 
 Jamais de texte lu, de contenu de fichier, de lien signé ni de clé.
 
-Niveaux (LOG_LEVEL, « info » par défaut) :
-- info : la vie du travailleur et de chaque tâche (prise, fin, échec, annulation) ;
-- debug : en plus, chaque appel à Howé et chaque étape d'une tâche, avec sa durée
-  (téléchargement, lecture Tesseract, encodage, transcription…). Pour chercher une panne
-  ou une lenteur, puis revenir à « info ».
+Niveaux (LOG_LEVEL, « info » par défaut, choix de l'utilisateur du 13/11/2026) :
+- info : tout le détail, la vie du travailleur et de chaque tâche, chaque appel à Howé et
+  chaque étape d'une tâche avec sa durée (téléchargement, lecture Tesseract, encodage,
+  transcription…) ;
+- warning : seulement les avertissements et les erreurs ;
+- error : seulement les erreurs.
 
-Chaque ligne porte « level » : « warning » et « error » s'écrivent quel que soit le niveau.
+Chaque ligne porte « level ».
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-LEVELS = {"debug": 10, "info": 20, "warning": 30, "error": 40}
+LEVELS = {"info": 20, "warning": 30, "error": 40}
 
 _threshold = LEVELS.get(os.environ.get("LOG_LEVEL", "info").strip().lower(), LEVELS["info"])
 _write_lock = threading.Lock()
@@ -54,10 +55,6 @@ def level_name() -> str:
     return next(name for name, value in LEVELS.items() if value == _threshold)
 
 
-def debug_enabled() -> bool:
-    return _threshold <= LEVELS["debug"]
-
-
 def log(event: str, level: str = "info", **fields: Any) -> None:
     if LEVELS.get(level, LEVELS["info"]) < _threshold:
         return
@@ -70,10 +67,6 @@ def log(event: str, level: str = "info", **fields: Any) -> None:
         sys.stdout.flush()
 
 
-def debug(event: str, **fields: Any) -> None:
-    log(event, "debug", **fields)
-
-
 def warning(event: str, **fields: Any) -> None:
     log(event, "warning", **fields)
 
@@ -84,17 +77,17 @@ def error(event: str, **fields: Any) -> None:
 
 @contextmanager
 def step(name: str, **fields: Any) -> Iterator[dict[str, Any]]:
-    """Chronomètre une étape d'une tâche (niveau debug). Le dictionnaire rendu reçoit des
-    mesures à ajouter à la ligne (tailles, nombres). Une étape qui lève est notée « échouée »
-    avec le type de l'erreur, puis l'erreur continue son chemin."""
+    """Chronomètre une étape d'une tâche. Le dictionnaire rendu reçoit des mesures à ajouter
+    à la ligne (tailles, nombres). Une étape qui lève est notée « échouée » avec le type de
+    l'erreur, puis l'erreur continue son chemin."""
     extra: dict[str, Any] = {}
     started = time.monotonic()
     try:
         yield extra
     except BaseException as exc:
-        debug("step.failed", step=name, ms=_ms(started), error=type(exc).__name__, **fields, **extra)
+        log("step.failed", step=name, ms=_ms(started), error=type(exc).__name__, **fields, **extra)
         raise
-    debug("step.done", step=name, ms=_ms(started), **fields, **extra)
+    log("step.done", step=name, ms=_ms(started), **fields, **extra)
 
 
 def host_of(url: str) -> str:
